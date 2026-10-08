@@ -20,7 +20,7 @@ const db = mysql.createPool({
   database: 'byhkjuc1hiflmfwleeyu',
   port: 3306,
   waitForConnections: true,
-  connectionLimit: 3,
+  connectionLimit: 2,
   queueLimit: 0
 });
 
@@ -84,6 +84,9 @@ db.query(`CREATE TABLE IF NOT EXISTS session_checkins (
 
 let currentLiveQuestion = null;
 let currentQuestionIndex = 0;
+let hardwareLobby = new Map();
+
+const getHardwareLobby = () => Array.from(hardwareLobby.values()).sort((a, b) => a.device_id - b.device_id);
 
 // ==========================================
 // CÁC API PHÒNG THI & ĐỀ THI
@@ -142,6 +145,10 @@ app.delete('/api/questions/clear', (req, res) => {
 // ==========================================
 app.get('/api/hardware/mapping', (req, res) => {
   db.query("SELECT * FROM hardware_mappings WHERE session_id = ?", [req.query.session_id], (err, r) => res.json(r || []));
+});
+
+app.get('/api/hardware/lobby', (req, res) => {
+  res.json({ devices: getHardwareLobby() });
 });
 
 app.post('/api/hardware/mapping', (req, res) => {
@@ -234,8 +241,44 @@ io.on('connection', (socket) => {
 });
 
 const mqttClient = mqtt.connect('mqtt://broker.emqx.io'); 
-mqttClient.on('connect', () => { mqttClient.subscribe('lagan50ki/quiz/submit'); });
+mqttClient.on('connect', () => {
+  mqttClient.subscribe('lagan50ki/quiz/submit');
+  mqttClient.subscribe('lagan50ki/quiz/checkin');
+});
 mqttClient.on('message', (topic, message) => {
+  if (topic === 'lagan50ki/quiz/checkin') {
+    try {
+      const { device_id, status } = JSON.parse(message.toString());
+      const id = parseInt(device_id);
+      if (!Number.isInteger(id) || id <= 0) return;
+
+      if (status === 'leave') {
+        hardwareLobby.delete(id);
+        io.emit('hardware_lobby_update', { devices: getHardwareLobby() });
+        console.log(`📟 STT ${id} đã rời sảnh`);
+        return;
+      }
+
+      // STT trên ESP32 chính là STT trong danh sách lớp.
+      // Tra tên trực tiếp từ bảng class_students rồi mới đưa lên sảnh.
+      db.query("SELECT full_name FROM class_students WHERE stt = ? LIMIT 1", [id], (err, rows) => {
+        const studentName = (!err && rows && rows.length > 0)
+          ? rows[0].full_name
+          : 'Không tìm thấy trong danh sách';
+
+        hardwareLobby.set(id, {
+          device_id: id,
+          stt: id,
+          student_name: studentName
+        });
+
+        io.emit('hardware_lobby_update', { devices: getHardwareLobby() });
+        console.log(`📟 Vào sảnh: STT ${id} - ${studentName}`);
+      });
+    } catch (e) {}
+    return;
+  }
+
   if (topic === 'lagan50ki/quiz/submit') {
     try {
       const { device_id, answer } = JSON.parse(message.toString());
